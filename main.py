@@ -8,7 +8,6 @@ import math
 import torch
 import fvecs_read
 from tabusearch import *
-
 #问题综述：找到X的最佳量化模式，数学表达为求解CB-X的最小值，C和B迭代进行，C为根据维度的随机初始矩阵
 #X是数据组成的矩阵，维度为d*n
 #C是codebook，是一个d*k的矩阵
@@ -39,6 +38,8 @@ tabu_t = 1 #5
 Max_iter_num = 18
 #输出的b的维度
 action_output_num = 16
+#actor网络输出维度
+actor_size=4
 coff = [0.8, 0.2]
 gamma = 0.99
 tau = 0.001
@@ -65,8 +66,8 @@ if __name__ == "__main__":
         #对抽取的t个样本中的第一个样本进行学习
         # _C是当前codebook，b是这个样本对应的码值(来源于上一阶段的禁忌搜索)，x是抽取到的样本
         # model_ddpg1 = db.DDPGB(_C, b, x, action_output_num)
-        model_ddpg1 = db.DDPGB(_C, _B, org_X[i:i+1].T, action_output_num)
-        float_b1 = model_ddpg1.generate_B(coff, gamma, tau, hidden_size, static_d)
+        model_ddpg1 = db.DDPGB(_C, _B, org_X[i:i+1].T, action_output_num,actor_size)
+        float_b1 = model_ddpg1.generate_B(coff, gamma, tau, hidden_size, static_d,actor_size)
         b1 = mc.binazation(float_b1)
         # 对于剩余的x样本，比对和这t个样本的欧式距离，选取距离最小的进行模型读取和finetune，得到各自的b
         # 组合这些b形成_B

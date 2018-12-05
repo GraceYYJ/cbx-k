@@ -1,4 +1,4 @@
-#encoding: utf-8
+# encoding: utf-8
 import sys
 
 import torch
@@ -10,71 +10,57 @@ import torch.nn.functional as F
 import my_common as mc
 from spp_layer import spatial_pyramid_pool
 
+
 def soft_update(target, source, tau):
     for target_param, param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
+
 
 def hard_update(target, source):
     for target_param, param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_(param.data)
 
-"""
-From: https://github.com/pytorch/pytorch/issues/1959
-There's an official LayerNorm implementation in pytorch now, but it hasn't been included in 
-pip version yet. This is a temporary version
-This slows down training by a bit
-"""
-# class LayerNorm(nn.Module):
-#     def __init__(self, num_features, eps=1e-5, affine=True):
-#         super(LayerNorm, self).__init__()
-#         self.num_features = num_features
-#         self.affine = affine
-#         self.eps = eps
-#
-#         if self.affine:
-#             if torch.cuda.is_available():
-#                 self.gamma = nn.Parameter(torch.Tensor(num_features).cuda().uniform_())
-#                 self.beta = nn.Parameter(torch.zeros(num_features).cuda())
-#             else:
-#                 self.gamma = nn.Parameter(torch.Tensor(num_features).uniform_())
-#                 self.beta = nn.Parameter(torch.zeros(num_features))
-#
-#     def forward(self, x):
-#         shape = [-1] + [1] * (x.dim() - 1)
-#         mean = x.view(x.size(0), -1).mean(1).view(*shape)
-#         std = x.view(x.size(0), -1).std(1).view(*shape)
-#
-#         y = (x - mean) / (std + self.eps)
-#         if self.affine:
-#             shape = [1, -1] + [1] * (x.dim() - 2)
-#             y = self.gamma.view(*shape) * y + self.beta.view(*shape)
-#         return y
-#
-# nn.LayerNorm = LayerNorm
 
-spp_num_outputs = [1,2,4]
+spp_num_outputs = [1, 2, 4]
+
+
+class ActorRnn(nn.Module):
+    def __init__(self, in_dim, hidden_dim, n_layer, n_class):
+        super(ActorRnn, self).__init__()
+        self.n_layer = n_layer
+        self.hidden_dim = hidden_dim
+        self.lstm = nn.LSTM(in_dim=in_dim, hidden_dim=hidden_dim, n_layer=n_layer, batch_first=True)
+
+    def forward(self, C):
+        out, _ = self.lstm(C)
+        # res_Cbx = states
+        # res_Cbx = res_Cbx.squeeze()
+
+        # Decode hidden state of last time step
+        out = self.fc(out[:, -1, :])
+
+        return out
+
 
 class Actor(nn.Module):
-    #hidden_size代表全连接中的隐层基本数量
-    #action代表b
-    #num_outputs代表Actor网络的输出维度
-    #num_intputs代表Actor网络的输入维度
+    # hidden_size代表全连接中的隐层基本数量
+    # action代表b
+    # num_outputs代表Actor网络的输出维度
+    # num_intputs代表Actor网络的输入维度
 
     # -------------------- 如果使用resnet 则使用下列参数 -------------------------
     # spp_num_outputs代表数据使用spp时的分割字典数组
     # spp_data_width = data_width代表数据从一位向量被转化为二维向量时的第一个维度数
     # fc_num_inputs代表在spp下计算得到的金字塔输出维度，也是fc的输入维度，取代num_intputs
-    def __init__(self, hidden_size, action, num_inputs, spp_num_outputs=[1,2,4], data_width=8):
+    def __init__(self, hidden_size, action, num_inputs, num_output, spp_num_outputs=[1, 2, 4], data_width=8):
         super(Actor, self).__init__()
         self.action = action
-        #self.num_outputs = self.action.shape[0]
-        #actor网络输出为一个0/1数值
-        self.num_outputs = 1
         self.num_inputs = num_inputs
+        self.num_outputs = num_output
 
         self.spp_data_width = data_width
         self.spp_num_outputs = spp_num_outputs
-        self.fc_num_inputs = sum([i*i for i in self.spp_num_outputs])
+        self.fc_num_inputs = sum([i * i for i in self.spp_num_outputs])
 
         '''
         #设计残差模块用于Cb-x的向量输入
@@ -102,7 +88,7 @@ class Actor(nn.Module):
         '''
 
         # 第一个全连接网络，层上归一化，随机relu
-        #self.afc1 = nn.Linear(self.fc_num_inputs, hidden_size)
+        # self.afc1 = nn.Linear(self.fc_num_inputs, hidden_size)
         self.afc1 = nn.Linear(self.num_inputs, hidden_size)
         self.ln1 = nn.LayerNorm(hidden_size)
         self.relu1 = nn.RReLU(0.01, 0.33)
@@ -118,12 +104,12 @@ class Actor(nn.Module):
         self.relu3 = nn.RReLU(0.66, 0.99)
 
         # 第四个全连接网络，层上归一化，随机relu
-        self.afc4 = nn.Linear(hidden_size, hidden_size//2)
-        self.ln4 = nn.LayerNorm(hidden_size//2)
+        self.afc4 = nn.Linear(hidden_size, hidden_size // 2)
+        self.ln4 = nn.LayerNorm(hidden_size // 2)
         self.drop = nn.Dropout()
 
-        #第五层全连接，准备进行激活
-        self.mu = nn.Linear(hidden_size//2, self.num_outputs)
+        # 第五层全连接，准备进行激活
+        self.mu = nn.Linear(hidden_size // 2, self.num_outputs)
         self.mu.weight.data.mul_(0.1)
         self.mu.bias.data.mul_(0.1)
 
@@ -164,13 +150,14 @@ class Actor(nn.Module):
         mu = torch.sigmoid(self.mu(x))
         return mu
 
+
 class Critic(nn.Module):
-    #与Actor网络几乎一致，只是在前两层的网络中
+    # 与Actor网络几乎一致，只是在前两层的网络中
     def __init__(self, hidden_size, action, num_inputs, spp_num_outputs, data_width=8):
         super(Critic, self).__init__()
         self.action = action
-        #self.num_outputs = self.action.shape[0]
-        self.num_outputs=1
+        self.num_outputs = self.action.shape[0]
+        # self.num_outputs=1
         self.num_inputs = num_inputs
 
         self.spp_data_width = data_width
@@ -209,8 +196,8 @@ class Critic(nn.Module):
         self.ln12 = nn.LayerNorm(hidden_size)
         self.relu12 = nn.RReLU(0.01, 0.33)
 
-        self.cfc2 = nn.Linear(hidden_size*2, hidden_size*2)
-        self.ln2 = nn.LayerNorm(hidden_size*2)
+        self.cfc2 = nn.Linear(hidden_size * 2, hidden_size * 2)
+        self.ln2 = nn.LayerNorm(hidden_size * 2)
         self.relu2 = nn.RReLU(0.33, 0.66)
 
         self.cfc3 = nn.Linear(hidden_size * 2, hidden_size)
@@ -221,12 +208,17 @@ class Critic(nn.Module):
         self.ln4 = nn.LayerNorm(hidden_size // 2)
         self.drop = nn.Dropout()
 
-        self.V = nn.Linear(hidden_size//2, 1)
+        self.V = nn.Linear(hidden_size // 2, 1)
         self.V.weight.data.mul_(0.1)
         self.V.bias.data.mul_(0.1)
 
     def forward(self, states, actions):
+        states = states.squeeze()
+        actions = actions.squeeze()
+
         x_b = actions
+        x_b = x_b.reshape(-1, self.num_outputs)
+
         x_b = self.cfc11(x_b)
         x_b = self.ln11(x_b)
         x_b = self.relu11(x_b)
@@ -236,8 +228,8 @@ class Critic(nn.Module):
         x_Cbx = self.ln12(x_Cbx)
         x_Cbx = self.relu12(x_Cbx)
 
-        x = torch.cat([x_b, x_Cbx], 0)
-        #x = x.squeeze(1)
+        x = torch.cat([x_b, x_Cbx], -1)
+        # x = x.squeeze(1)
 
         x = self.cfc2(x)
         x = self.ln2(x)
@@ -254,31 +246,32 @@ class Critic(nn.Module):
         V = self.V(x)
         return V
 
+
 class DDPG(object):
-    def __init__(self, gamma, tau, hidden_size, action, num_inputs):
+    def __init__(self, gamma, tau, hidden_size, action, num_inputs, actor_size):
 
         self.action = action
         self.hd = action.shape[0]
 
         if torch.cuda.is_available():
-            self.actor = Actor(hidden_size, self.action, num_inputs).cuda()
-            self.actor_target = Actor(hidden_size, self.action, num_inputs).cuda()
-            self.actor_perturbed = Actor(hidden_size, self.action, num_inputs).cuda() #探索阶段
+            self.actor = Actor(hidden_size, self.action, num_inputs, actor_size).cuda()
+            self.actor_target = Actor(hidden_size, self.action, num_inputs, actor_size).cuda()
+            self.actor_perturbed = Actor(hidden_size, self.action, num_inputs, actor_size).cuda()  # 探索阶段
         else:
-            self.actor = Actor(hidden_size, self.action, num_inputs)
-            self.actor_target = Actor(hidden_size, self.action, num_inputs)
-            self.actor_perturbed = Actor(hidden_size, self.action, num_inputs)  # 探索阶段
+            self.actor = Actor(hidden_size, self.action, num_inputs, actor_size)
+            self.actor_target = Actor(hidden_size, self.action, num_inputs, actor_size)
+            self.actor_perturbed = Actor(hidden_size, self.action, num_inputs, actor_size)  # 探索阶段
 
-        self.actor_optim = Adam(self.actor.parameters(), lr=0.05) #actor的学习阶段，随机梯度下降，注意学习率
+        self.actor_optim = Adam(self.actor.parameters(), lr=0.05)  # actor的学习阶段，随机梯度下降，注意学习率
 
         if torch.cuda.is_available():
-            self.critic = Critic(hidden_size, self.action, num_inputs,spp_num_outputs).cuda()
-            self.critic_target = Critic(hidden_size, self.action, num_inputs,spp_num_outputs).cuda()
+            self.critic = Critic(hidden_size, self.action, num_inputs, spp_num_outputs).cuda()
+            self.critic_target = Critic(hidden_size, self.action, num_inputs, spp_num_outputs).cuda()
         else:
-            self.critic = Critic(hidden_size, self.action, num_inputs,spp_num_outputs)
-            self.critic_target = Critic(hidden_size, self.action, num_inputs,spp_num_outputs)
+            self.critic = Critic(hidden_size, self.action, num_inputs, spp_num_outputs)
+            self.critic_target = Critic(hidden_size, self.action, num_inputs, spp_num_outputs)
 
-        self.critic_optim = Adam(self.critic.parameters(), lr=0.1) #critic的学习阶段，随机梯度下降，注意学习率
+        self.critic_optim = Adam(self.critic.parameters(), lr=0.1)  # critic的学习阶段，随机梯度下降，注意学习率
 
         self.gamma = gamma
         self.tau = tau
@@ -286,16 +279,16 @@ class DDPG(object):
         hard_update(self.actor_target, self.actor)  # Make sure target is with the same weight
         hard_update(self.critic_target, self.critic)
 
-    #探索阶段的行为确定，对mu的扰动
+    # 探索阶段的行为确定，对mu的扰动
     def select_action(self, state, action_noise=None, param_noise=None):
         self.actor.eval()
         if param_noise is not None:
-            if(torch.cuda.is_available()):
+            if (torch.cuda.is_available()):
                 mu = self.actor_perturbed((Variable(state).cuda()))
             else:
                 mu = self.actor_perturbed((Variable(state)))
         else:
-            if(torch.cuda.is_available()):
+            if (torch.cuda.is_available()):
                 mu = self.actor((Variable(state).cuda()))
             else:
                 mu = self.actor((Variable(state)))
@@ -303,7 +296,7 @@ class DDPG(object):
         self.actor.train()
         mu = mu.data
 
-        #扰动的出发条件
+        # 扰动的出发条件
         if action_noise is not None:
             '''
             if torch.cuda.is_available():
@@ -311,11 +304,10 @@ class DDPG(object):
             else:
                 mu += torch.Tensor(action_noise.noise())
             '''
-            #根据随机的效果取一半的数据更改符号
-            mu = mc.random_change_sgn(0, self.hd-1, self.hd//22,mu)
+            # 根据随机的效果取一半的数据更改符号
+            mu = mc.random_change_sgn(0, self.hd - 1, self.hd // 22, mu)
 
         return mu
-
 
     def update_parameters(self, batch):
         if torch.cuda.is_available():
@@ -334,25 +326,26 @@ class DDPG(object):
         next_action_batch = self.actor_target(next_state_batch)
         next_state_action_values = self.critic_target(next_state_batch, next_action_batch)
 
-        reward_batch = reward_batch.unsqueeze(1)#纵向排列
+        reward_batch = reward_batch.unsqueeze(1)  # 纵向排列
         mask_batch = mask_batch.unsqueeze(1)
-        expected_state_action_batch = reward_batch + (self.gamma * mask_batch * next_state_action_values)#mask_batch中是true和false，python会自动将其转换为1和0
+        expected_state_action_batch = reward_batch + (
+                self.gamma * mask_batch * next_state_action_values)  # mask_batch中是true和false，python会自动将其转换为1和0
 
-        #critic网络重置梯度为0
+        # critic网络重置梯度为0
         self.critic_optim.zero_grad()
 
         state_action_batch = self.critic((state_batch), (action_batch))
 
-        #以均方差loss计算value值并反馈
+        # 以均方差loss计算value值并反馈
         value_loss = F.mse_loss(state_action_batch, expected_state_action_batch)
         value_loss.backward()
-        self.critic_optim.step()#完成参数更新
+        self.critic_optim.step()  # 完成参数更新
 
         # critic网络重置梯度为0
         self.actor_optim.zero_grad()
 
-        #对于Actor网络，使用critic的计算值作为反馈的loss
-        policy_loss = -self.critic((state_batch),self.actor((state_batch)))
+        # 对于Actor网络，使用critic的计算值作为反馈的loss
+        policy_loss = -self.critic((state_batch), self.actor((state_batch)))
         policy_loss = policy_loss.mean()
         policy_loss.backward()
         self.actor_optim.step()
@@ -365,10 +358,10 @@ class DDPG(object):
     def perturb_actor_parameters(self, param_noise):
         """Apply parameter noise to actor model, for exploration"""
         hard_update(self.actor_perturbed, self.actor)
-        params = self.actor_perturbed.state_dict() #取出所有的params，并且把给的noise加入到param中
+        params = self.actor_perturbed.state_dict()  # 取出所有的params，并且把给的noise加入到param中
         for name in params:
-            if 'ln' in name: 
-                pass 
+            if 'ln' in name:
+                pass
             param = params[name]
             param += torch.randn(param.shape) * param_noise.current_stddev
 
@@ -377,9 +370,9 @@ class DDPG(object):
             os.makedirs('models/')
 
         if actor_path is None:
-            actor_path = "models/ddpg_actor_{}_{}".format(env_name, suffix) 
+            actor_path = "models/ddpg_actor_{}_{}".format(env_name, suffix)
         if critic_path is None:
-            critic_path = "models/ddpg_critic_{}_{}".format(env_name, suffix) 
+            critic_path = "models/ddpg_critic_{}_{}".format(env_name, suffix)
         print('Saving models to {} and {}'.format(actor_path, critic_path))
         torch.save(self.actor.state_dict(), actor_path)
         torch.save(self.critic.state_dict(), critic_path)
@@ -388,5 +381,5 @@ class DDPG(object):
         print('Loading models from {} and {}'.format(actor_path, critic_path))
         if actor_path is not None:
             self.actor.load_state_dict(torch.load(actor_path))
-        if critic_path is not None: 
+        if critic_path is not None:
             self.critic.load_state_dict(torch.load(critic_path))

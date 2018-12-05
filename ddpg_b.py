@@ -21,12 +21,13 @@ class DDPGB(object):
     # env代表action和obersevation的产生环境
     # agent代表实际的ddpg执行体
     # 保留这些噪声参数只是为了能够进入到需要随机探索的部分
-    def __init__(self, C, b, x, action_output_num, replay_size=1000000, ou_noise=True, param_noise=True,
+    def __init__(self, C, b, x, action_output_num, actor_size, replay_size=1000000, ou_noise=True, param_noise=True,
                  noise_scale=0.3, final_noise_scale=0.3):
         self.C = C
-        self.x = x
         self.b = b
+        self.x = x
         self.hd = action_output_num
+        self.actor_size = actor_size
         self.memory = ReplayMemory(replay_size)
         self.new_b = None
         self.env = None
@@ -44,16 +45,17 @@ class DDPGB(object):
         self.x = x
 
     # 备选coff代表reward中的权重比例[0.2, 0.8]
-    def generate_B(self, coff, gamma, tau, hidden_size, num_inputs, num_episodes=60000,
+    def generate_B(self, coff, gamma, tau, hidden_size, num_inputs, actor_size, num_episodes=60000,
                    exploration_end=150, batch_size=512, updates_per_step=5000):
 
         self.env = QuantizationEnv(self.C, self.b, self.x, self.hd, coff)
-        self.agent = DDPG(gamma, tau, hidden_size, self.env.action_bin, num_inputs)
+        self.agent = DDPG(gamma, tau, hidden_size, self.env.action_bin, num_inputs, actor_size)
         rewards = []
         total_numsteps = 0
         updates = 0
         max_trail = 10000
         best_bb = 10000
+
         # 开启num_episodes次最佳方案寻找
         for i_episode in range(num_episodes):
             state = torch.Tensor([self.env.reset()])
@@ -79,8 +81,8 @@ class DDPGB(object):
                     control_bit = control_bit % 16
                 state = next_state
                 action = self.agent.select_action(state, self.ounoise, self.param_noise)
-                next_state, reward, done, bb = self.env.step(action, control_bit)
-                #print(control_bit, next_state[0], reward, done, bb)
+                next_state, reward, done, bb = self.env.step(action, control_bit,self.actor_size)
+                # print(control_bit, next_state[0], reward, done, bb)
                 control_bit = control_bit + 1
                 total_numsteps += 1
                 episode_reward += reward
